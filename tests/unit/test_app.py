@@ -46,3 +46,9 @@ def test_note_limit(client):
 
 def test_method_not_allowed(client):
     assert client.delete("/api/notes").status_code == 405
+
+
+def test_note_text_is_trimmed(client):
+    r = client.post("/api/notes", json={"text": "  hello  "})
+    assert r.status_code == 201
+    assert r.get_json()["text"] == "hello"
