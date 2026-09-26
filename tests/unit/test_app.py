@@ -52,3 +52,9 @@ def test_note_text_is_trimmed(client):
     r = client.post("/api/notes", json={"text": "  hello  "})
     assert r.status_code == 201
     assert r.get_json()["text"] == "hello"
+
+
+def test_healthz_is_json(client):
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.mimetype == "application/json"
