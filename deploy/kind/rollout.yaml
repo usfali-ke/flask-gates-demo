@@ -51,6 +51,8 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             privileged: false
+            # Also set at pod level; Kyverno disallow-privileged checks the container.
+            runAsNonRoot: true
             capabilities:
               drop: ["ALL"]
           # gunicorn's worker heartbeat files and control socket.
