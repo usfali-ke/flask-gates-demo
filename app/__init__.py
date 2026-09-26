@@ -26,6 +26,7 @@ INDEX = """<!doctype html>
 <body>
 <h1>flask-gates-demo</h1>
 <p>A minimal notes API used to exercise the G1&ndash;G6 DevSecOps gates end to end.</p>
+<p>A minimal notes API used to exercise the G1&ndash;G6 DevSecOps gates end to end.</p>
 <ul>
 <li><code>GET /api/notes</code> &mdash; list notes</li>
 <li><code>POST /api/notes</code> &mdash; add a note: <code>{"text": "..."}</code></li>
