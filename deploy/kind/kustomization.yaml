@@ -18,4 +18,4 @@ images:
   # admission (Kyverno) requires digests.
   - name: flask-gates-demo
     newName: ghcr.io/usfali-ke/flask-gates-demo
-    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    digest: sha256:d8723df311c65e4756fbd368cc7d713f241fd87104bac5e80dbc9735a15825f3
