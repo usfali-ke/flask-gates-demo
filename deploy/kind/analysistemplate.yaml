@@ -1,0 +1,74 @@
+# Canary analysis — exactly two checks, matching the Argo CD Application's
+# dashboard.validations=functional,security_control. No Prometheus metric
+# exists, so monitoring isn't claimed. Both hit the canary Service only.
+#
+# functional (web provider): /healthz answers {"status": "ok"}.
+# security_control (job provider): the canary still sends its security
+# headers and still rejects invalid input — the controls G3 tested, checked
+# again on the pods actually taking traffic.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: flask-gates-demo-canary-health
+spec:
+  metrics:
+    - name: functional
+      interval: 15s
+      count: 3
+      failureLimit: 0
+      consecutiveErrorLimit: 1
+      successCondition: result.status == 'ok'
+      provider:
+        web:
+          url: http://flask-gates-demo-canary.flask-gates-demo.svc/healthz
+          jsonPath: "{$}"
+          timeoutSeconds: 10
+    - name: security-control
+      count: 1
+      failureLimit: 0
+      provider:
+        job:
+          spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: 90
+            template:
+              spec:
+                restartPolicy: Never
+                automountServiceAccountToken: false
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 100
+                  runAsGroup: 101
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: probe
+                    image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop: ["ALL"]
+                    resources:
+                      requests:
+                        cpu: 10m
+                        memory: 16Mi
+                      limits:
+                        cpu: 100m
+                        memory: 64Mi
+                    env:
+                      - name: BASE
+                        value: http://flask-gates-demo-canary.flask-gates-demo.svc
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        set -u
+                        fail=0
+                        headers=$(curl -sS -D - -o /dev/null --max-time 10 "$BASE/") || headers=""
+                        for h in "x-content-type-options: nosniff" "x-frame-options: DENY" "content-security-policy: default-src 'none'"; do
+                          if printf '%s' "$headers" | tr -d '\r' | grep -qi "^$h"; then echo "ok   header $h"
+                          else echo "FAIL header $h missing"; fail=1; fi
+                        done
+                        code=$(curl -sS -o /dev/null --max-time 10 -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"text":""}' "$BASE/api/notes") || code="curl-error"
+                        if [ "$code" = 400 ]; then echo "ok   invalid note rejected (400)"; else echo "FAIL invalid note -> $code, want 400"; fail=1; fi
+                        exit $fail

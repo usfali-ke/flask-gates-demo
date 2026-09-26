@@ -1,0 +1,83 @@
+# Progressive delivery: half the replicas move to the new digest, the
+# AnalysisTemplate probes the canary, and only a passing analysis promotes
+# to 100%. A failed analysis aborts and scales the canary back to stable.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: flask-gates-demo
+  labels:
+    app: flask-gates-demo
+  annotations:
+    # Accepted, documented exception to the G2 iac_clean checkov scan:
+    checkov.io/skip1: CKV2_K8S_6=NetworkPolicy is platform-owned; the Argo CD AppProject forbids product repos from shipping one
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: flask-gates-demo
+  strategy:
+    canary:
+      canaryService: flask-gates-demo-canary
+      stableService: flask-gates-demo-stable
+      steps:
+        - setWeight: 50
+        - analysis:
+            templates:
+              - templateName: flask-gates-demo-canary-health
+        - setWeight: 100
+  template:
+    metadata:
+      labels:
+        app: flask-gates-demo
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: flask-gates-demo
+          # Kustomize `images:` rewrites this to ghcr.io/...@sha256:<digest>.
+          image: flask-gates-demo
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          # gunicorn's worker heartbeat files and control socket.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi

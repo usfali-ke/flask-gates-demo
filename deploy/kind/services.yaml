@@ -1,0 +1,38 @@
+# Without a traffic router the canary's share of traffic is its share of
+# replicas. Argo Rollouts adds the pod-template-hash selector to -stable /
+# -canary.
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask-gates-demo
+spec:
+  selector:
+    app: flask-gates-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask-gates-demo-stable
+spec:
+  selector:
+    app: flask-gates-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask-gates-demo-canary
+spec:
+  selector:
+    app: flask-gates-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

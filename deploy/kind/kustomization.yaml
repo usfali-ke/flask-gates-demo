@@ -1,0 +1,21 @@
+# GitOps source of truth for the kind environment. Argo CD (app
+# `flask-gates-demo-kind`, created cluster-side) syncs this directory with
+# selfHeal; nothing else writes to the namespace. The only automated edit is
+# the image digest below, committed by devsecops-release.yml (G5) after G4
+# approves a change.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: flask-gates-demo
+
+resources:
+  - services.yaml
+  - analysistemplate.yaml
+  - rollout.yaml
+
+images:
+  # The all-zero digest is a placeholder until the first devsecops-release
+  # run replaces it with a G2-signed digest. Never put a tag here:
+  # admission (Kyverno) requires digests.
+  - name: flask-gates-demo
+    newName: ghcr.io/usfali-ke/flask-gates-demo
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
