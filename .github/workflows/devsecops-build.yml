@@ -193,11 +193,13 @@ jobs:
           cosign attest --yes --type slsaprovenance1 --predicate provenance.slsa1.json "$REF"
       - if: steps.ready.outputs.not_ready == ''
         # GitHub's attestation store too, so `gh attestation verify` works.
+        # Not pushed to the registry: GHCR has no referrers API, so pushing
+        # rewrites the sha256-<digest> fallback index and drops cosign's
+        # SBOM attestation from it.
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ needs.build.outputs.digest }}
-          push-to-registry: true
       - id: verify
         if: always() && steps.ready.outputs.not_ready == ''
         # Pass means the signature and both attestations verify against the
