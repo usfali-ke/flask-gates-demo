@@ -47,6 +47,9 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+              # Explicit, not defaulted: the Rollout CRD has no defaulting, so
+              # an unset protocol (live: TCP) kept Argo CD OutOfSync forever.
+              protocol: TCP
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
