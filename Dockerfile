@@ -4,7 +4,7 @@
 # deliberately, in a reviewed PR.
 FROM ghcr.io/astral-sh/uv:0.12.19@sha256:04d046b13e60d6bcec73cbc5e1cad25d680dea90c8573340950a0ac2d1aef424 AS uv
 
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS builder
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS builder
 COPY --from=uv /uv /bin/
 # No bytecode compilation: .pyc files are the usual source of build-to-build
 # differences, and the runtime root filesystem is read-only anyway.
@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # The runtime stage has no RUN steps: only copied files, so its layers
 # depend on nothing but the inputs (and SOURCE_DATE_EPOCH for timestamps).
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS runtime
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS runtime
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY app ./app
