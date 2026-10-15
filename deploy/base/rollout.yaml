@@ -1,6 +1,16 @@
 # Progressive delivery: half the replicas move to the new digest, the
 # AnalysisTemplate probes the canary, and only a passing analysis promotes
 # to 100%. A failed analysis aborts and scales the canary back to stable.
+#
+# Data: notes live in the memory of a single gunicorn worker (the Dockerfile
+# pins --workers 1 so every request reaches the same process). Each pod has
+# its own notes and nothing survives a restart — enough for gate and canary
+# testing, not a data design. No Secret is mounted: this app has no
+# credentials.
+#
+# Shared by every environment; deploy/<env>/ sets the namespace, the replica
+# count (where it differs) and the image digest. deploy/kind is an overlay of
+# this base too, for the kind cluster.
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
@@ -58,7 +68,10 @@ spec:
             runAsNonRoot: true
             capabilities:
               drop: ["ALL"]
-          # gunicorn's worker heartbeat files and control socket.
+          # The image runs with a read-only root filesystem, so gunicorn's
+          # worker heartbeat files and control socket need a writable /tmp
+          # (HOME=/tmp in the Dockerfile too). Notes are in memory, so this is
+          # the only path the app writes.
           volumeMounts:
             - name: tmp
               mountPath: /tmp
