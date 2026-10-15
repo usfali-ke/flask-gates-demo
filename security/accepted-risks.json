@@ -1,0 +1,11 @@
+{
+  "_doc": "Accepted-risk register. Each entry suppresses exactly one finding id for one control, with a reason and an expiry; an expired entry stops applying and the finding blocks again. verdict.py applies these and every verdict lists the ones it used, so the evidence shows what was accepted, not just that the control passed. Changes go through a reviewed PR like any code. Checkov exceptions live inline as checkov.io/skip annotations (checkov's own mechanism) and are counted in its verdict.",
+  "accepted": [
+    {
+      "control": "image-compliance",
+      "id": "DKL-DI-0005",
+      "reason": "Upstream python:3.12-slim leaves apt InRelease index files after `apt-get dist-clean` (no package lists). This image installs nothing with apt and its runtime stage has no RUN steps at all, so the files belong to the base layers and cannot be removed from them; the runtime never uses apt.",
+      "expires": "2027-03-31"
+    }
+  ]
+}
