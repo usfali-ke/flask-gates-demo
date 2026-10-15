@@ -39,7 +39,7 @@ jobs:
         run: |
           mkdir -p zap && chmod 777 zap
           docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:2.17.0 \
-            zap-baseline.py -t "$TARGET_URL" -J zap.json -I -m 2 || true
+            zap-baseline.py -t "$TARGET_URL" -J zap.json -x zap.xml -I -m 2 || true
       - id: verdict
         if: always()
         run: python3 .github/scripts/verdict.py zap zap/zap.json
@@ -47,5 +47,7 @@ jobs:
         if: always()
         with:
           name: evidence-dast
-          path: zap/zap.json
+          path: |
+            zap/zap.json
+            zap/zap.xml
           if-no-files-found: ignore
