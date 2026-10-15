@@ -17,7 +17,7 @@ def call(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 — fixed http://127.0.0.1 target
+        with urllib.request.urlopen(req, timeout=10) as r:  # a fixed http://127.0.0.1 target (S310 does not apply)
             return r.status, r.headers, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.headers, e.read()

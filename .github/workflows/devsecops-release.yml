@@ -1,426 +1,257 @@
-# G4 — Release approval, then G5 — Deployment, for the digest G2 built
-# from this commit. Run from main: Actions → devsecops-release → Run
-# workflow, with the change-request issue number.
+# The release pipeline: every dynamic test runs against an environment
+# AFTER the new digest is deployed to it, never against a build. One run
+# walks the SDLC phases in order — the same signed digest all the way —
+# and a stage's phase sequence only starts when the previous environment
+# finished its own (its tests included). Each stage
+# (devsecops-stage.yml, one call per environment) runs the phases in
+# order, each ending at its control gate; a failed gate breaks the run
+# there — no later phase in the stage, and no later environment:
 #
-#   G4 release approval ─┬─ provenance ─┐
-#   (environment          └─ config ────┴─ deploy ─ G5 deployment gate
-#    release-approval)
+#   devsecops-pipeline (CI)    Plan → Develop ─ G1 ─ → Build ─ G2 ─ → Release
+#     └ starts this pipeline for the digest it published
+#   dev      Deliver (resolve, provenance, evidence, config) and Release
+#            (notes, rollback plan) in parallel → G5 → Deploy (GitOps +
+#            G6 admission on the cluster) → Test (smoke, integration,
+#            regression, security, DAST, dependency re-check) → G3
+#     ▼ Approval Gate `staging-approval` (test results, scans, notes)
+#   staging  Deliver + Release records → G5 → Deploy (G6) → Test
+#            (smoke, e2e, regression, performance, security, DAST, TLS)
+#            → G3 → UAT ready (feeds prod's G4)
+#     ▼ G4 `release-approval` (UAT sign-off, Go/No-Go, change window)
+#   prod     Deliver + Release records (G4 CAB: `release-approval`, then
+#            the dashboard's decision on the change request) → G5 →
+#            Deploy (canary, G6 admission) → Test (read-only smoke) →
+#            Monitor (health watch) → G6 gate → a failure starts the
+#            rollback
+#   Operate   rollback prod (automatic, on a failure after the deploy)
+#   Feedback  summary, change-request + PR comments, rollback command
 #
-# G4 needs two independent approvals:
-#   1. the protected environment `release-approval` — GitHub holds the job
-#      until a required reviewer approves the run;
-#   2. the security dashboard's decision on the change record (approved,
-#      readiness, client approval, window, no open High/Critical, G2/G3 of
-#      this digest). This run leaves a `release-request` artifact; the
-#      dashboard answers with commit status `security-dashboard/G4`
-#      pointing at this run.
-# G5 deploys only by committing the digest to deploy/kind; Argo CD syncs
-# it and runs the canary analysis. Nothing here talks to the cluster.
+# Each stage passes the next the digest it deployed: staging and prod
+# refuse to run if the previous environment has moved on to a newer
+# release since.
+#
+# The pipeline starts a run at dev for every main commit it published.
+# Start one by hand at any stage (Actions → devsecops-release → Run
+# workflow): `start: staging` promotes what dev runs, `start: prod` what
+# staging runs; `kind: rollback` redeploys the start environment's previous
+# digest and stops there. prod needs the change request (input `change`,
+# or the one whose Release field names the commit), and whoever started,
+# re-ran or authored the change can't approve a stage.
+#
+# Waiting at an Approval Gate holds nothing up: a newer run's deploy to the
+# same environment waits for this one's (concurrency per environment in
+# devsecops-stage.yml), and if a newer run is already waiting there too,
+# GitHub cancels the older waiting run's deploy.
 
 name: devsecops-release
+run-name: >-
+  release ${{ inputs.commit && format('{0} ', inputs.commit) || '' }}from ${{ inputs.start }} (${{ inputs.kind }})
 
 on:
   workflow_dispatch:
     inputs:
-      change:
-        description: Change request issue number (the CHG-<n> being released)
-        required: true
-        type: number
-      kind:
-        description: Deployment kind
+      start:
+        description: Stage to start from (dev = a main commit's image; staging/prod = what the previous environment runs)
         required: true
         type: choice
-        options: [planned, hotfix, fix_forward]
+        options: [dev, staging, prod]
+        default: dev
+      kind:
+        description: Deployment kind (rollback = the start environment's digest before its last deploy, that stage only)
+        required: true
+        type: choice
+        options: [planned, hotfix, fix_forward, rollback]
         default: planned
-      allow-self-approval:
-        description: 'SEGREGATION-OF-DUTIES EXCEPTION (single-operator mode): approve with the starter/author account. Opt-in per run; honoured only for a repository admin, and recorded in the verdict detail.'
+      commit:
+        description: start dev only — the main commit whose image to deploy (default the commit this runs on)
         required: false
-        type: boolean
-        default: false
+        type: string
+      change:
+        description: prod — change request being released (7, #7 or CHG-7); default the one whose Release field names this release
+        required: false
+        type: string
+      allow-self-approval:
+        description: 'SEGREGATION-OF-DUTIES EXCEPTION (single-operator mode): approve with the starter/author account. Opt-in per run; the waiver is recorded in the verdict detail.'
+        required: false
+        type: string
+        default: ""
 
 permissions: {}
 
-concurrency:
-  group: devsecops-release
-  cancel-in-progress: false
-
-env:
-  IMAGE: ghcr.io/usfali-ke/flask-gates-demo
-  CHANGE_ID: CHG-${{ inputs.change }}
-  CERT_IDENTITY_REGEXP: ^https://github\.com/usfali-ke/flask-gates-demo/\.github/workflows/devsecops-build\.yml@refs/heads/main$
-  CERT_ISSUER: https://token.actions.githubusercontent.com
-
 jobs:
-  g4:
-    name: G4 release approval
-    if: github.ref == 'refs/heads/main'
-    environment: release-approval
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: read
-      statuses: read
-      # Separation of duties (approvals.sh): the run's actor/re-runner, the
-      # change's pull request and its commits, and the repository admins
-      # behind the admin-gated self-approval waiver.
-      actions: read
-      issues: read
-      pull-requests: read
-    outputs:
-      digest: ${{ steps.digest.outputs.digest }}
-      started-at: ${{ steps.digest.outputs.at }}
-    steps:
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-      - id: digest
-        name: Resolve the G2 image for this commit
-        run: |
-          set -euo pipefail
-          if ! digest=$(docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}" --format '{{.Manifest.Digest}}' 2>/dev/null) || [ -z "$digest" ]; then
-            echo "::error::No image ${IMAGE}:sha-${GITHUB_SHA} — devsecops-build (G2) hasn't built this commit, or failed before pushing"
-            exit 1
-          fi
-          { echo "digest=$digest"; echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } >> "$GITHUB_OUTPUT"
-          echo "Releasing ${IMAGE}@${digest} (${CHANGE_ID})"
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
-        with:
-          cosign-release: v2.6.5
-      - name: Signed by G2
-        # G2 signs only digests that passed it — an unsigned digest failed
-        # G2, so don't even ask for approval.
-        env:
-          DIGEST: ${{ steps.digest.outputs.digest }}
-        run: |
-          cosign verify --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$CERT_ISSUER" "${IMAGE}@${DIGEST}" >/dev/null \
-            || { echo "::error::${IMAGE}@${DIGEST} has no valid G2 signature"; exit 1; }
-      - id: change
-        name: Change request
-        # The CAB approves a change request that is still open. change.sh
-        # resolves the required `change:` input (CHANGE_ID = CHG-<n>) and
-        # fails closed when it doesn't exist or is a pull request.
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CHANGE: ${{ inputs.change }}
-          SOURCE_SHA: ${{ github.sha }}
-          REQUIRE: "true"
-        run: bash .github/scripts/change.sh
-      - name: The change request must be open
-        env:
-          ID: ${{ steps.change.outputs.id }}
-          STATE: ${{ steps.change.outputs.state }}
-          URL: ${{ steps.change.outputs.url }}
-        run: |
-          set -euo pipefail
-          if [ "$STATE" != open ]; then
-            echo "::error::${ID} is ${STATE}, not open — the CAB approves a change request that is still open (reopen it: ${URL})"
-            exit 1
-          fi
-          echo "${ID} is open" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Separation of duties
-        id: sod
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.sha }}
-          # Single-operator exception, admin-gated inside approvals.sh:
-          # honoured when this run asks for it or the repository variable is
-          # set (only an admin can set either), and only for a repository
-          # admin.
-          ALLOW_SELF_APPROVAL: ${{ inputs.allow-self-approval || vars.ALLOW_SELF_APPROVAL }}
-        # Whoever started or re-ran this run, or authored the change, can't
-        # be its approver; the dashboard checks the same thing independently.
-        run: bash .github/scripts/approvals.sh release-approval
-      - env:
-          DIGEST: ${{ steps.digest.outputs.digest }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/release-request"
-          jq -n --arg change "$CHANGE_ID" --arg subject "$DIGEST" --arg sha "$GITHUB_SHA" \
-            '{change_id: $change, subject: $subject, commit_sha: $sha}' | tee "$RUNNER_TEMP/release-request/release-request.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-request
-          path: ${{ runner.temp }}/release-request/release-request.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: Wait for the dashboard's G4 decision
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        # Only a status pointing at this run answers this request; an older
-        # G4 status on the same commit belongs to another release.
-        run: |
-          set -uo pipefail
-          for _ in $(seq 60); do
-            s=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/statuses?per_page=100" \
-                  --jq "[.[] | select(.context == \"security-dashboard/G4\" and .target_url == \"${RUN_URL}\")][0] // empty" 2>/dev/null)
-            case "$(jq -r '.state // empty' <<<"${s:-null}")" in
-              success) echo "G4: $(jq -r .description <<<"$s")"; exit 0 ;;
-              failure|error) echo "::error::$(jq -r '.description // "G4 blocked"' <<<"$s")"; exit 1 ;;
-            esac
-            sleep 20
-          done
-          echo "::error::dashboard collector did not answer within 20 minutes (no security-dashboard/G4 status for this run)"
-          exit 1
-
-  provenance:
-    # Both stores, and the provenance must name this exact commit — a valid
-    # attestation for some other build of main isn't enough.
-    needs: g4
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
-      attestations: read
-    outputs:
-      result: ${{ steps.verdict.outputs.result }}
-    env:
-      DIGEST: ${{ needs.g4.outputs.digest }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          sparse-checkout: .github
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
-        with:
-          cosign-release: v2.6.5
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-      - id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          fail=""
-          if cosign verify-attestation --type slsaprovenance1 --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
-               --certificate-oidc-issuer "$CERT_ISSUER" "${IMAGE}@${DIGEST}" > slsa.jsonl 2>/dev/null; then
-            jq -r '.payload | @base64d | fromjson | .predicate.buildDefinition.resolvedDependencies[]?.digest.gitCommit // empty' slsa.jsonl \
-              | grep -qx "$GITHUB_SHA" || fail="$fail slsa-commit-mismatch"
-          else
-            fail="$fail cosign-slsaprovenance1"
-          fi
-          gh attestation verify "oci://${IMAGE}@${DIGEST}" --repo "$GITHUB_REPOSITORY" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/devsecops-build.yml" >/dev/null || fail="$fail gh-attestation"
-          if [ -z "$fail" ]; then
-            { echo "status=pass"; echo "detail=cosign slsaprovenance1 (devsecops-build.yml@refs/heads/main, commit ${GITHUB_SHA:0:7}) and gh attestation verify both passed"; } >> "$GITHUB_OUTPUT"
-          else
-            { echo "status=fail"; echo "detail=provenance verification failed:${fail}"; } >> "$GITHUB_OUTPUT"
-          fi
-      - id: verdict
-        if: always()
-        env:
-          STATUS: ${{ steps.check.outputs.status }}
-          DETAIL: ${{ steps.check.outputs.detail || 'verification did not run' }}
-        run: python3 .github/scripts/verdict.py result "$STATUS" "$DETAIL"
-
-  config:
-    # The target config is controlled: the render is schema-valid and the
-    # only change vs git is the image digest.
-    needs: g4
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      result: ${{ steps.verdict.outputs.result }}
-    env:
-      DIGEST: ${{ needs.g4.outputs.digest }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - id: check
-        run: |
-          set -uo pipefail
-          python3 .github/scripts/set_digest.py deploy/kind/kustomization.yaml "$DIGEST" || exit 0
-          mkdir -p render
-          kubectl kustomize deploy/kind > render/kind.yaml || exit 0
-          grep -q "image: ${IMAGE}@${DIGEST}" render/kind.yaml || { echo "::error::render does not reference the released digest"; exit 0; }
-          # Rollout/AnalysisTemplate schemas from the datreeio CRDs catalog;
-          # -strict rejects unknown fields instead of ignoring them.
-          docker run --rm -v "$PWD/render:/render:ro" ghcr.io/yannh/kubeconform:v0.8.0 \
-            -strict -summary -output json -schema-location default \
-            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-            /render/kind.yaml > render/kubeconform.json
-          echo "rc=$?" >> "$GITHUB_OUTPUT"
-          echo "changed=$(git status --porcelain | awk '{print $2}' | grep -v '^render/' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
-      - id: verdict
-        if: always()
-        env:
-          RC: ${{ steps.check.outputs.rc }}
-          CHANGED: ${{ steps.check.outputs.changed }}
-        run: python3 .github/scripts/verdict.py kubeconform render/kubeconform.json
-
-  deploy:
-    # The only write path to the cluster: a commit on main that Argo CD
-    # syncs. [skip ci] keeps it from re-running G2 (deploy/** is also
-    # path-ignored there).
-    needs: [g4, provenance, config]
-    runs-on: ubuntu-latest
+  dev:
+    name: Dev · deploy + test (Dev)
+    if: github.ref == 'refs/heads/main' && inputs.start == 'dev'
+    uses: ./.github/workflows/devsecops-stage.yml
     permissions:
       contents: write
-    outputs:
-      result: ${{ steps.verdict.outputs.result }}
-      # The commit that carries this digest on main — the release commit, or
-      # (a re-run of an already-pinned digest) the commit that already did.
-      gitops-sha: ${{ steps.commit.outputs.gitops_sha }}
-    env:
-      DIGEST: ${{ needs.g4.outputs.digest }}
+      packages: write
+      id-token: write
+      attestations: read
+      statuses: read
+      actions: read
+      issues: write
+      pull-requests: read
+    secrets:
+      # devsecops-stage.yml is a called workflow: repo secrets are not
+      # available inside it unless they are passed here. The deploy job
+      # reads exactly this one (the ruleset bypass for its push to main).
+      GITOPS_DEPLOY_KEY: ${{ secrets.GITOPS_DEPLOY_KEY }}
+    with:
+      environment: dev
+      kind: ${{ inputs.kind }}
+      commit: ${{ inputs.commit }}
+      allow-self-approval: ${{ inputs.allow-self-approval }}
+
+  staging:
+    name: Staging · deploy + test (Staging)
+    needs: dev
+    # Chained: only after dev deployed AND passed its tests (the stage
+    # fails otherwise). A rollback stays in the environment it started in.
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' &&
+      (inputs.start == 'staging' || (inputs.start == 'dev' && inputs.kind != 'rollback' && needs.dev.result == 'success'))
+    uses: ./.github/workflows/devsecops-stage.yml
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: read
+      statuses: read
+      actions: read
+      issues: write
+      pull-requests: read
+    secrets:
+      # devsecops-stage.yml is a called workflow: repo secrets are not
+      # available inside it unless they are passed here. The deploy job
+      # reads exactly this one (the ruleset bypass for its push to main).
+      GITOPS_DEPLOY_KEY: ${{ secrets.GITOPS_DEPLOY_KEY }}
+    with:
+      environment: staging
+      kind: ${{ inputs.kind }}
+      expect-digest: ${{ needs.dev.outputs.digest }}
+      allow-self-approval: ${{ inputs.allow-self-approval }}
+
+  prod:
+    name: Production · deploy + test (Production)
+    needs: staging
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' &&
+      (inputs.start == 'prod' || (inputs.start != 'prod' && inputs.kind != 'rollback' && needs.staging.result == 'success'))
+    uses: ./.github/workflows/devsecops-stage.yml
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: read
+      statuses: read
+      actions: read
+      issues: write
+      pull-requests: read
+    secrets:
+      # devsecops-stage.yml is a called workflow: repo secrets are not
+      # available inside it unless they are passed here. The deploy job
+      # reads exactly this one (the ruleset bypass for its push to main).
+      GITOPS_DEPLOY_KEY: ${{ secrets.GITOPS_DEPLOY_KEY }}
+    with:
+      environment: prod
+      kind: ${{ inputs.kind }}
+      change: ${{ inputs.change }}
+      expect-digest: ${{ needs.staging.outputs.digest }}
+      allow-self-approval: ${{ inputs.allow-self-approval }}
+
+  rollback:
+    name: Operate · rollback prod (automatic)
+    # prod deployed and then failed its smoke tests or health watch (or
+    # Argo CD's G6): start the rollback right away. It redeploys the
+    # digest prod ran before (the deploy commit's Rollback-Digest) through
+    # the same gates, so it still waits for a release-approval reviewer:
+    # nothing reaches prod unapproved, but nobody has to work out what to
+    # roll back to. A failed canary never gets here: Argo Rollouts has
+    # already aborted it and prod still runs the old digest.
+    needs: prod
+    if: >-
+      always() && github.ref == 'refs/heads/main' && inputs.kind != 'rollback' &&
+      needs.prod.result == 'failure' && needs.prod.outputs.gitops-sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: true
-          fetch-depth: 0
-      - id: commit
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGE_ID: ${{ needs.prod.outputs.change-id }}
+          GITOPS_SHA: ${{ needs.prod.outputs.gitops-sha }}
+          SELF_APPROVAL: ${{ vars.ALLOW_SELF_APPROVAL }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/set_digest.py deploy/kind/kustomization.yaml "$DIGEST"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add deploy/kind/kustomization.yaml
-          if git diff --cached --quiet; then
-            # Idempotent re-deploy: deploy/kind already pins this digest (a
-            # re-run of the same release). There is nothing to commit, and an
-            # empty `git commit` would fail the job — so carry forward the
-            # commit that put this digest there, which is what the post-deploy
-            # wait and the deployment event then refer to.
-            sha=$(git log -1 --format=%H HEAD -- deploy/kind/kustomization.yaml)
-            echo "deploy/kind already pins ${DIGEST:0:19}… (${sha:0:7}) — nothing to commit"
-            echo "gitops_sha=$sha" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git commit -m "deploy(kind): flask-gates-demo ${DIGEST:7:12} ${CHANGE_ID} [skip ci]" \
-            -m "Released ${IMAGE}@${DIGEST} from ${GITHUB_SHA} by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          git push origin HEAD:main
-          echo "gitops_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - id: verdict
-        if: always()
-        env:
-          SHA: ${{ steps.commit.outputs.gitops_sha }}
-        run: |
-          if [ -n "$SHA" ]; then
-            python3 .github/scripts/verdict.py result pass "GitOps commit ${SHA:0:7} → Argo CD app flask-gates-demo-kind"
-          else
-            python3 .github/scripts/verdict.py result fail "GitOps commit/push to main failed"
-          fi
-      - name: Build deployment-event
-        if: steps.commit.outputs.gitops_sha != ''
-        env:
-          GITOPS_SHA: ${{ steps.commit.outputs.gitops_sha }}
-          KIND: ${{ inputs.kind }}
-        # in_progress: the commit is only the start. Argo CD notifications
-        # report the sync/canary outcome under the same external_id
-        # (deploy-<dashboard.environment>-<revision>).
-        run: |
-          mkdir -p "$RUNNER_TEMP/deployment-event"
-          jq -n \
-            --arg id "deploy-kind-${GITOPS_SHA}" --arg change "$CHANGE_ID" --arg sha "$GITHUB_SHA" \
-            --arg digest "$DIGEST" --arg commit_at "$(git show -s --format=%cI "$GITHUB_SHA")" \
-            --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg kind "$KIND" \
-            --arg run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            '{external_id: $id, environment: "kind", change_id: $change, commit_sha: $sha,
-              artifact_digest: $digest, commit_at: $commit_at, started_at: $started,
-              status: "in_progress", kind: $kind, via_approved_path: true, break_glass: false,
-              run_url: $run}' | tee "$RUNNER_TEMP/deployment-event/deployment.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: steps.commit.outputs.gitops_sha != ''
-        with:
-          name: deployment-event
-          path: ${{ runner.temp }}/deployment-event/deployment.json
-          if-no-files-found: error
-          retention-days: 30
+          args=(-f start=prod -f kind=rollback -f "change=$CHANGE_ID")
+          [ -z "${SELF_APPROVAL:-}" ] || args+=(-f "allow-self-approval=$SELF_APPROVAL")
+          gh workflow run devsecops-release.yml --repo "$GITHUB_REPOSITORY" --ref main "${args[@]}"
+          echo "prod failed after deploy ${GITOPS_SHA:0:7}: rollback started (devsecops-release, start prod, kind rollback${CHANGE_ID:+, ${CHANGE_ID}}); it waits for release-approval" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
-  post-deploy:
-    name: Deploy · verify the rollout (G6 status)
-    # Argo CD reports G6 (sync, canary analysis, Kyverno admission) to the
-    # dashboard; the dashboard mirrors it as commit status
-    # `security-dashboard/G6` on the deploy commit. This repo deploys to a
-    # single environment, so the BARE context — the newest decision of any
-    # environment, the one documented for single-environment workflows — is
-    # what to wait on. A GitHub-hosted runner can't see the cluster, so this
-    # is how the release learns the outcome. It is additional evidence: it
-    # fails the run when the rollout never went green.
-    needs: [deploy]
-    if: ${{ !cancelled() && needs.deploy.result == 'success' }}
+  feedback:
+    name: Feedback · monitoring, logging & feedback
+    # Every run ends here, whatever happened: where the release got to,
+    # told to the people behind it (change request, pull requests) and, if
+    # a stage failed after it deployed, the rollback that undoes it. The
+    # dashboard gets the same from the artifacts (gate results, deployment
+    # events, release evidence) and Argo CD's notifications.
+    needs: [dev, staging, prod, rollback]
+    if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 10
     permissions:
       contents: read
-      statuses: read
-    outputs:
-      result: ${{ steps.verdict.outputs.result }}
-    env:
-      GITOPS_SHA: ${{ needs.deploy.outputs.gitops-sha }}
+      actions: read
+      issues: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: .github
-      - id: wait
+      - name: Summary + comments
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+          KIND: ${{ inputs.kind }}
+          CHANGE: ${{ inputs.change }}
+          ROLLBACK: ${{ needs.rollback.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
-          mkdir -p post-deploy
-          context=security-dashboard/G6
-          for _ in $(seq 90); do
-            s=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITOPS_SHA}/statuses?per_page=100" \
-                  --jq "[.[] | select(.context == \"${context}\")][0] // empty" 2>/dev/null)
-            state=$(jq -r '.state // empty' <<<"${s:-null}")
-            desc=$(jq -r '.description // ""' <<<"${s:-null}")
-            if [ "$state" = success ] || [ "$state" = failure ] || [ "$state" = error ]; then
-              jq . <<<"$s" > post-deploy/g6-status.json
-              { echo "status=$([ "$state" = success ] && echo pass || echo fail)"
-                echo "detail=G6 ${state}: ${desc} ($(jq -r '.target_url // ""' <<<"$s"))"; } >> "$GITHUB_OUTPUT"
-              exit 0
+          icon() { case "$1" in success) echo "✅";; failure) echo "❌";; cancelled) echo "⏹";; *) echo "⏭";; esac; }
+          jobs=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" --jq '.jobs[]' | jq -s .)
+          source=$(jq -r '[.[].outputs["source-sha"] // empty | select(. != "")][0] // empty' <<<"$NEEDS")
+          digest=$(jq -r '[.[].outputs.digest // empty | select(. != "")][-1] // empty' <<<"$NEEDS")
+          rollback=""
+          table="| stage | result | digest | deploy commit | failed step |"$'\n'"|---|---|---|---|---|"
+          for env in dev staging prod; do
+            r=$(jq -r --arg e "$env" '.[$e].result' <<<"$NEEDS")
+            d=$(jq -r --arg e "$env" '.[$e].outputs.digest // ""' <<<"$NEEDS")
+            g=$(jq -r --arg e "$env" '.[$e].outputs["gitops-sha"] // ""' <<<"$NEEDS")
+            name=$(case "$env" in dev) echo "Dev · deploy + test (Dev)";; staging) echo "Staging · deploy + test (Staging)";; prod) echo "Production · deploy + test (Production)";; esac)
+            failed=$(jq -r --arg n "$name" '[.[] | select((.name | startswith($n + " / ")) and .conclusion == "failure") | .name | sub("^[^/]+/ "; "")] | join(", ")' <<<"$jobs")
+            table+=$'\n'"| ${name} | $(icon "$r") ${r} | ${d:+\`${d:0:19}…\`} | ${g:0:7} | ${failed} |"
+            # Deployed, then failed its checks: say how to go back.
+            if [ "$r" = failure ] && [ -n "$g" ] && [ "$env" = prod ] && [ "$ROLLBACK" = success ]; then
+              rollback+=$'\n'"- **prod** failed after deploy: the rollback run was started automatically and waits for \`release-approval\`"
+            elif [ "$r" = failure ] && [ -n "$g" ]; then
+              rollback+=$'\n'"- **${env}** runs a digest that failed after deploy: \`gh workflow run devsecops-release.yml --ref main -f start=${env} -f kind=rollback\`"
             fi
-            sleep 20
           done
-          { echo "status=fail"
-            echo "detail=no ${context} status on ${GITOPS_SHA:0:7} within 30 minutes (Argo CD sync or notification didn't reach the dashboard)"; } >> "$GITHUB_OUTPUT"
-      - name: Write the post-deploy report
-        if: always()
-        env:
-          STATUS: ${{ steps.wait.outputs.status }}
-          DETAIL: ${{ steps.wait.outputs.detail || 'the wait did not run' }}
-        run: |
-          mkdir -p post-deploy
-          jq -n --arg status "$STATUS" --arg detail "$DETAIL" \
-            '{control: "post-deploy", status: $status, detail: $detail}' | tee post-deploy/report.json
-      - id: verdict
-        if: always()
-        env:
-          STATUS: ${{ steps.wait.outputs.status }}
-          DETAIL: ${{ steps.wait.outputs.detail || 'the wait did not run' }}
-        run: python3 .github/scripts/verdict.py result "$STATUS" "$DETAIL"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: report-post-deploy
-          path: post-deploy/
-          if-no-files-found: ignore
-
-  gate-g5:
-    name: G5 deployment gate
-    needs: [g4, provenance, config, deploy]
-    if: always() && needs.g4.result == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          sparse-checkout: .github
-      - uses: ./.github/actions/gate
-        with:
-          gate: G5
-          needs: ${{ toJSON(needs) }}
-          subject: ${{ needs.g4.outputs.digest }}
-          artifact-digest: ${{ needs.g4.outputs.digest }}
-          environment: kind
-          started-at: ${{ needs.g4.outputs.started-at }}
+          body="### Release ${source:+${source:0:7} }(${KIND})${digest:+ · \`${digest:0:19}…\`} — [run](${RUN_URL})"$'\n\n'"${table}"
+          [ -z "$rollback" ] || body+=$'\n\n'"#### Rollback"$'\n'"Argo Rollouts already aborts a canary that fails its analysis. For a problem found after the rollout:${rollback}"
+          echo "$body" >> "$GITHUB_STEP_SUMMARY"
+          [ -n "$source" ] || exit 0
+          # The change request (if any names this release) and the pull
+          # requests merged as this commit hear how far it got.
+          SOURCE_SHA=$source CHANGE=$CHANGE GITHUB_OUTPUT="$RUNNER_TEMP/change.out" bash .github/scripts/change.sh || true
+          n=$(sed -n 's/^number=//p' "$RUNNER_TEMP/change.out" 2>/dev/null)
+          [ -z "$n" ] || gh api "repos/${GITHUB_REPOSITORY}/issues/${n}/comments" -f body="$body" > /dev/null
+          for pr in $(gh api "repos/${GITHUB_REPOSITORY}/commits/${source}/pulls" --jq '.[].number' 2>/dev/null); do
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments" -f body="$body" > /dev/null || true
+          done

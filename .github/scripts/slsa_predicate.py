@@ -1,6 +1,6 @@
 """SLSA v1 provenance predicate for `cosign attest --type slsaprovenance1`,
 built from the GitHub context the way GitHub's own generator shapes it.
-devsecops-release.yml checks resolvedDependencies names the released
+devsecops-release.yml checks that resolvedDependencies names the released
 commit."""
 
 import json
