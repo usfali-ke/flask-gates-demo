@@ -123,3 +123,8 @@ jobs:
           needs: ${{ toJSON(needs) }}
           subject: pr-${{ github.event.pull_request.number }}
           commit-sha: ${{ github.event.pull_request.head.sha }}
+          # A pull-request evaluation describes the pre-merge state and
+          # repeats on every push, so it is not recorded as current
+          # evidence — only a run that is not a pull_request records
+          # gate-result-G1.
+          record: ${{ github.event_name != 'pull_request' }}
