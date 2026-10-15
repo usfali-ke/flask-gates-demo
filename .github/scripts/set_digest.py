@@ -1,5 +1,5 @@
 """Set the images[].digest in a kustomization — the one automated edit
-GitOps allows (devsecops-release.yml G5). Fails unless exactly one digest
+GitOps allows (devsecops-release.yml). Fails unless exactly one digest
 line is replaced, so a changed file layout can't silently deploy nothing."""
 
 import re
