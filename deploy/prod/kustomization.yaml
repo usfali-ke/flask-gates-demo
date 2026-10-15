@@ -1,0 +1,33 @@
+# prod: gets only a digest that passed G3 in staging, and only after G4
+# (change approval). devsecops-release.yml (environment: prod) commits it
+# after G5. Argo CD app `flask-gates-demo-prod` syncs it with selfHeal;
+# nothing else writes to the namespace.
+# Two replicas: the canary step moves one of them to the new digest, so a
+# rolling promotion always leaves a stable pod taking traffic.
+# The only automated edit is the image digest below (set_digest.py).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: flask-gates-demo-prod
+
+resources:
+  - ../base
+
+patches:
+  - target: {kind: Rollout, name: flask-gates-demo}
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 2
+  - target: {kind: AnalysisTemplate, name: flask-gates-demo-canary-health}
+    patch: |
+      - op: replace
+        path: /spec/metrics/0/provider/web/url
+        value: http://flask-gates-demo-canary.flask-gates-demo-prod.svc/healthz
+
+images:
+  # Never a tag: admission (Kyverno require-image-digest) requires digests.
+  # Every environment starts at the digest the kind environment runs;
+  # promotion replaces it.
+  - name: flask-gates-demo
+    newName: ghcr.io/usfali-ke/flask-gates-demo
+    digest: sha256:d8723df311c65e4756fbd368cc7d713f241fd87104bac5e80dbc9735a15825f3

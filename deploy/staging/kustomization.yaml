@@ -1,0 +1,32 @@
+# staging: gets only a digest that is running and verified (G6) in dev.
+# devsecops-release.yml (environment: staging) commits it after G5, then
+# runs G3 against this namespace. Argo CD app `flask-gates-demo-stg`.
+# One replica: notes live in each pod's process memory, and the staging
+# tests create and read them in the pod they test.
+# The only automated edit is the image digest below (set_digest.py).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: flask-gates-demo-stg
+
+resources:
+  - ../base
+
+patches:
+  - target: {kind: Rollout, name: flask-gates-demo}
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target: {kind: AnalysisTemplate, name: flask-gates-demo-canary-health}
+    patch: |
+      - op: replace
+        path: /spec/metrics/0/provider/web/url
+        value: http://flask-gates-demo-canary.flask-gates-demo-stg.svc/healthz
+
+images:
+  # Never a tag: admission (Kyverno require-image-digest) requires digests.
+  # Every environment starts at the digest the kind environment runs;
+  # promotion replaces it.
+  - name: flask-gates-demo
+    newName: ghcr.io/usfali-ke/flask-gates-demo
+    digest: sha256:d8723df311c65e4756fbd368cc7d713f241fd87104bac5e80dbc9735a15825f3

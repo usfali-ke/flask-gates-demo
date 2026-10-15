@@ -1,16 +1,23 @@
 # GitOps source of truth for the kind environment. Argo CD (app
 # `flask-gates-demo-kind`, created cluster-side) syncs this directory with
-# selfHeal; nothing else writes to the namespace. The only automated edit is
-# the image digest below, committed by devsecops-release.yml (G5) after G4
-# approves a change.
+# selfHeal; nothing else writes to the namespace. It is an overlay of
+# ../base like every other environment — only the namespace, the
+# namespace-qualified AnalysisTemplate URL and the image digest differ.
+# The only automated edit is the image digest below, committed by
+# devsecops-release.yml (G5) after G4 approves a change.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: flask-gates-demo
 
 resources:
-  - services.yaml
-  - analysistemplate.yaml
-  - rollout.yaml
+  - ../base
+
+patches:
+  - target: {kind: AnalysisTemplate, name: flask-gates-demo-canary-health}
+    patch: |
+      - op: replace
+        path: /spec/metrics/0/provider/web/url
+        value: http://flask-gates-demo-canary.flask-gates-demo.svc/healthz
 
 images:
   # The all-zero digest is a placeholder until the first devsecops-release
