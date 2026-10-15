@@ -121,10 +121,14 @@ jobs:
         with:
           gate: G1
           needs: ${{ toJSON(needs) }}
-          subject: pr-${{ github.event.pull_request.number }}
-          commit-sha: ${{ github.event.pull_request.head.sha }}
-          # A pull-request evaluation describes the pre-merge state and
-          # repeats on every push, so it is not recorded as current
-          # evidence — only a run that is not a pull_request records
-          # gate-result-G1.
-          record: ${{ github.event_name != 'pull_request' }}
+          subject: ${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+          commit-sha: ${{ github.event.pull_request.head.sha || github.sha }}
+          # This workflow runs only on pull_request / pull_request_review, so
+          # nothing it evaluates is ever current promotion evidence: a PR
+          # evaluation describes the pre-merge state (the author's unsigned
+          # commits, no reviewer yet, subject `pr-<n>`) and repeats on every
+          # push or review. Same guard as django-gates-demo — record only a
+          # push/workflow_dispatch run on main — which is false here, so the
+          # gate uploads `gate-preview-G1` (a name the dashboard doesn't
+          # collect) while the run still reports its own summary.
+          record: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}

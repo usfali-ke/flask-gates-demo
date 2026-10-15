@@ -32,6 +32,11 @@ on:
         type: choice
         options: [planned, hotfix, fix_forward]
         default: planned
+      allow-self-approval:
+        description: 'SEGREGATION-OF-DUTIES EXCEPTION (single-operator mode): approve with the starter/author account. Opt-in per run; honoured only for a repository admin, and recorded in the verdict detail.'
+        required: false
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -121,9 +126,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ github.sha }}
-          # Single-operator exception, admin-gated: honoured only when this
-          # repository variable is set (only an admin can set it).
-          ALLOW_SELF_APPROVAL: ${{ vars.ALLOW_SELF_APPROVAL }}
+          # Single-operator exception, admin-gated inside approvals.sh:
+          # honoured when this run asks for it or the repository variable is
+          # set (only an admin can set either), and only for a repository
+          # admin.
+          ALLOW_SELF_APPROVAL: ${{ inputs.allow-self-approval || vars.ALLOW_SELF_APPROVAL }}
         # Whoever started or re-ran this run, or authored the change, can't
         # be its approver; the dashboard checks the same thing independently.
         run: bash .github/scripts/approvals.sh release-approval
