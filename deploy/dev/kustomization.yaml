@@ -27,4 +27,4 @@ images:
   # promotion replaces it.
   - name: flask-gates-demo
     newName: ghcr.io/usfali-ke/flask-gates-demo
-    digest: sha256:d8723df311c65e4756fbd368cc7d713f241fd87104bac5e80dbc9735a15825f3
+    digest: sha256:e83cb641f5537ce9e11cb929f3e3ae73c479956c9f1db70361612e64f26a0a89
